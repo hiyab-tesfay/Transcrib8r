@@ -1,11 +1,9 @@
 import os
-import sys
 import tempfile
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from pathlib import Path
 from werkzeug.utils import secure_filename
-from openai import OpenAI
 from groq import Groq
 from dotenv import load_dotenv
 import traceback
@@ -14,31 +12,21 @@ import traceback
 from notes import generate_structured_notes
 
 # Configuration
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+FRONTEND_DIST = PROJECT_ROOT / "frontend" / "dist"
 app = Flask(__name__)
-CORS(app)  # Enable CORS for all routes
+allowed_origins = os.getenv(
+    "CORS_ORIGINS", "http://127.0.0.1:5173,http://localhost:5173"
+)
+allowed_origins = [origin.strip() for origin in allowed_origins.split(",") if origin.strip()]
+CORS(app, resources={r"/api/*": {"origins": allowed_origins}})
 app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024  # 200 MB upload limit
 
 # Load environment variables from .env (optional)
 load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env")
 
-# Get API key from config.py or environment variable
-def get_api_key():
-    """Get OpenAI API key from environment (or .env)."""
-    key = os.getenv('OPENAI_API_KEY')
-    if key:
-        return key
-    raise ValueError("OpenAI API key not found. Set OPENAI_API_KEY in environment or .env file.")
-
-# Initialize OpenAI client (for notes)
-try:
-    client = OpenAI(api_key=get_api_key())
-    print("✅ OpenAI client initialized successfully")
-except ValueError as e:
-    print(f"❌ Error: {e}")
-    print("Please create a config.py file with: OPENAI_API_KEY = 'your-key-here'")
-    sys.exit(1)
-
-# Initialize Groq client (for transcription)
+# Groq clients are created lazily so the app and portfolio demo can start
+# without API credentials. Real transcription still requires GROQ_API_KEY.
 def get_groq_key() -> str:
     """Get Groq API key from environment (or .env)."""
     key = os.getenv("GROQ_API_KEY")
@@ -46,11 +34,18 @@ def get_groq_key() -> str:
         return key
     raise ValueError("Groq API key not found. Set GROQ_API_KEY in environment or .env file.")
 
-groq_client = Groq(api_key=get_groq_key())
-print("✅ Groq client initialized successfully")
+
+def get_groq_client() -> Groq:
+    """Create a configured Groq client only when transcription is requested."""
+    return Groq(api_key=get_groq_key())
 
 # Allowed audio file extensions
 ALLOWED_EXTENSIONS = {".mp3", ".mp4", ".wav", ".m4a", ".mpeg", ".mpga", ".webm"}
+
+
+def live_api_enabled() -> bool:
+    """Return whether public requests may call paid AI providers."""
+    return os.getenv("LIVE_API_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
 
 
 def allowed_file(filename: str) -> bool:
@@ -58,22 +53,23 @@ def allowed_file(filename: str) -> bool:
     return Path(filename).suffix.lower() in ALLOWED_EXTENSIONS
 
 
-@app.route("/", methods=["GET"])
+@app.route("/api", methods=["GET"])
 def home():
     """Home route showing API status and available endpoints."""
     return jsonify({
         "status": "running",
         "version": "2.0",
         "endpoints": {
-            "POST /transcribe": "Upload audio file and get transcription",
-            "POST /generate-notes": "Generate structured notes from transcript text",
-            "GET /": "This help message"
+            "POST /api/transcribe": "Upload audio file and get transcription",
+            "POST /api/generate-notes": "Generate structured notes from transcript text",
+            "GET /api/health": "Check service configuration"
         },
-        "audio_formats": list(ALLOWED_EXTENSIONS),
+        "audio_formats": sorted(ALLOWED_EXTENSIONS),
         "max_upload_size_mb": 200
     }), 200
 
 
+@app.route("/api/transcribe", methods=["POST"])
 @app.route("/transcribe", methods=["POST"])
 def transcribe():
     """
@@ -83,6 +79,11 @@ def transcribe():
     Request: multipart/form-data with 'file' field containing audio
     Response: JSON with transcription text and metadata
     """
+    if not live_api_enabled():
+        return jsonify({
+            "error": "Live transcription is disabled on this portfolio deployment. Try the sample lecture instead."
+        }), 503
+
     # Check if file is present
     if 'file' not in request.files:
         return jsonify({'error': 'No file provided'}), 400
@@ -122,7 +123,7 @@ def transcribe():
 
         # Open and transcribe the audio file using Groq Whisper Large V3
         with open(temp_audio_path, 'rb') as audio_file:
-            transcription = groq_client.audio.transcriptions.create(
+            transcription = get_groq_client().audio.transcriptions.create(
                 file=audio_file,
                 model="whisper-large-v3"
             )
@@ -187,21 +188,31 @@ def transcribe():
         else:
             friendly = "Something went wrong while transcribing. Please try again."
 
-        return jsonify({'error': friendly, 'details': f"{err_type}: {msg}"}), 500
+        payload = {'error': friendly}
+        if app.debug:
+            payload['details'] = f"{err_type}: {msg}"
+        return jsonify(payload), 500
 
 
+@app.route("/api/health", methods=["GET"])
 @app.route("/health", methods=["GET"])
 def health():
     """Simple health check to verify configuration without exposing secrets."""
-    return jsonify({
+    response = {
         "status": "ok",
-        "groq_key_present": bool(os.getenv("GROQ_API_KEY")),
-        "openai_key_present": bool(os.getenv("OPENAI_API_KEY")),
-        "audio_formats": list(ALLOWED_EXTENSIONS),
+        "live_api_enabled": live_api_enabled(),
+        "audio_formats": sorted(ALLOWED_EXTENSIONS),
         "max_upload_size_mb": app.config.get("MAX_CONTENT_LENGTH", 0) // (1024 * 1024),
-    }), 200
+    }
+    if app.debug:
+        response.update({
+            "groq_key_present": bool(os.getenv("GROQ_API_KEY")),
+            "openai_key_present": bool(os.getenv("OPENAI_API_KEY")),
+        })
+    return jsonify(response), 200
 
 
+@app.route("/api/generate-notes", methods=["POST"])
 @app.route("/generate-notes", methods=["POST"])
 def generate_notes():
     """
@@ -216,6 +227,11 @@ def generate_notes():
     
     Response: JSON with generated notes
     """
+    if not live_api_enabled():
+        return jsonify({
+            "error": "Live note generation is disabled on this portfolio deployment. Try the sample lecture instead."
+        }), 503
+
     try:
         # Get JSON data
         data = request.get_json()
@@ -262,10 +278,41 @@ def generate_notes():
         print(f"❌ Note generation error ({error_type}): {error_msg}")
         import traceback
         print(traceback.format_exc(limit=3))
-        return jsonify({"error": f"Note generation failed: {error_msg}"}), 500
+        message = f"Note generation failed: {error_msg}" if app.debug else "Note generation failed. Please try again."
+        return jsonify({"error": message}), 500
+
+
+@app.route("/", methods=["GET"])
+def serve_frontend():
+    """Serve the production React build when it is available."""
+    if (FRONTEND_DIST / "index.html").exists():
+        return send_from_directory(FRONTEND_DIST, "index.html")
+    return jsonify({
+        "status": "running",
+        "message": "React development server is separate. Run `npm run dev` in frontend/.",
+        "api_docs": "/api"
+    }), 200
+
+
+@app.route("/<path:path>", methods=["GET"])
+def serve_frontend_assets(path: str):
+    """Serve built assets and fall back to React for client-side routes."""
+    target = FRONTEND_DIST / path
+    if target.is_file():
+        return send_from_directory(FRONTEND_DIST, path)
+    if path.startswith("api/"):
+        return jsonify({"error": "API route not found"}), 404
+    if (FRONTEND_DIST / "index.html").exists():
+        return send_from_directory(FRONTEND_DIST, "index.html")
+    return jsonify({"error": "Frontend build not found"}), 404
 
 
 if __name__ == "__main__":
     print("🚀 Starting Transcrib8 Flask backend...")
-    print("📡 Visit http://127.0.0.1:5000/ for API documentation")
-    app.run(debug=True, host='127.0.0.1', port=5000)
+    print("🌐 App: http://127.0.0.1:5000/")
+    print("📡 API: http://127.0.0.1:5000/api")
+    app.run(
+        debug=os.getenv("FLASK_DEBUG", "false").lower() == "true",
+        host=os.getenv("HOST", "127.0.0.1"),
+        port=int(os.getenv("PORT", "5000")),
+    )

@@ -45,7 +45,7 @@ def get_api_key() -> str:
 
 
 # Configuration constants (can be overridden with env vars)
-MODEL_NAME = os.getenv("NOTES_MODEL", "gpt-3.5-turbo")
+MODEL_NAME = os.getenv("NOTES_MODEL", "gpt-4.1-mini")
 MAX_COMPLETION_TOKENS = int(os.getenv("NOTES_MAX_TOKENS", "2200"))
 CHUNK_CHAR_LIMIT = int(os.getenv("NOTES_CHUNK_CHAR_LIMIT", "4000"))
 MAX_CHUNKS = int(os.getenv("NOTES_MAX_CHUNKS", "6"))

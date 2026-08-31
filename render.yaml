@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: transcrib8r
+    runtime: docker
+    plan: free
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    autoDeployTrigger: commit
+    envVars:
+      - key: LIVE_API_ENABLED
+        value: "false"
+      - key: FLASK_DEBUG
+        value: "false"
+      - key: NOTES_MODEL
+        value: gpt-4.1-mini
