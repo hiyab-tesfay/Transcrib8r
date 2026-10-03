@@ -115,4 +115,4 @@ Uploaded media is written to a temporary file for transcription and removed afte
 
 ## Project ownership
 
-Designed and built by Hiyab as a full-stack portfolio project focused on making recorded lectures more useful after class.
+Designed and built by a team during AI Collective (UC Davis Club) during a project building cohort. This version is an improved version built by Hiyab as a full-stack portfolio project focused on making recorded lectures more useful after class.
